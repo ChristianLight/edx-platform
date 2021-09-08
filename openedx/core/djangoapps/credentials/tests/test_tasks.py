@@ -18,7 +18,7 @@ from lms.djangoapps.certificates.data import CertificateStatuses
 from lms.djangoapps.certificates.models import GeneratedCertificate
 from lms.djangoapps.grades.models import PersistentCourseGrade
 from lms.djangoapps.grades.tests.utils import mock_passing_grade
-from lms.djangoapps.certificates.tests.factories import GeneratedCertificateFactory
+from lms.djangoapps.certificates.tests.factories import CertificateDateOverrideFactory, GeneratedCertificateFactory
 from openedx.core.djangoapps.catalog.tests.factories import CourseFactory, CourseRunFactory, ProgramFactory
 from openedx.core.djangoapps.credentials.helpers import is_learner_records_enabled
 from openedx.core.djangoapps.site_configuration.tests.factories import SiteConfigurationFactory, SiteFactory
@@ -155,6 +155,16 @@ class TestHandleNotifyCredentialsTask(TestCase):
         with freeze_time(datetime(2017, 5, 1, 3)):
             cert2 = GeneratedCertificateFactory(user=self.user, course_id='course-v1:edX+Test+22')
 
+        # Make a certificate outside of the command’s time range, but add a date
+        # override within the time range. The certificate should be included.
+        with freeze_time(datetime(2017, 4, 30, 0)):
+            cert3 = GeneratedCertificateFactory(user=self.user, course_id='course-v1:edX+Test+33')
+        with freeze_time(datetime(2017, 5, 1, 2)):
+            CertificateDateOverrideFactory(
+                generated_certificate=cert3,
+                overridden_by=self.user,
+            )
+
         with freeze_time(datetime(2017, 5, 1, 0)):
             grade1 = PersistentCourseGrade.objects.create(user_id=self.user.id, course_id='course-v1:edX+Test+11',
                                                           percent_grade=1)
@@ -171,7 +181,7 @@ class TestHandleNotifyCredentialsTask(TestCase):
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
 
         assert mock_send.called
-        self.assertListEqual(list(mock_send.call_args[0][0]), [cert1, cert2])
+        self.assertListEqual(list(mock_send.call_args[0][0]), [cert3, cert1, cert2])
         self.assertListEqual(list(mock_send.call_args[0][1]), [grade1, grade2])
 
         assert len(list(mock_send.call_args[0][0])) <= len(total_certificates)
