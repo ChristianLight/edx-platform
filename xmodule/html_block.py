@@ -8,8 +8,6 @@ import sys
 import textwrap
 from datetime import datetime
 
-from pkg_resources import resource_filename
-
 from django.conf import settings
 from fs.errors import ResourceNotFound
 from lxml import etree
@@ -17,6 +15,7 @@ from path import Path as path
 from web_fragments.fragment import Fragment
 from xblock.core import XBlock
 from xblock.fields import Boolean, List, Scope, String
+from xblocks_contrib.html import HtmlBlock as _ExtractedHtmlBlock
 
 from common.djangoapps.xblock_django.constants import ATTR_KEY_DEPRECATED_ANONYMOUS_USER_ID
 from xmodule.contentstore.content import StaticContent
@@ -24,10 +23,9 @@ from xmodule.editing_block import EditingMixin
 from xmodule.edxnotes_utils import edxnotes
 from xmodule.html_checker import check_html
 from xmodule.stringify import stringify_children
+from xmodule.util.builtin_assets import add_webpack_js_to_fragment, add_css_to_fragment
 from xmodule.util.misc import escape_html_characters
-from xmodule.util.xmodule_django import add_webpack_to_fragment
 from xmodule.x_module import (
-    HTMLSnippet,
     ResourceTemplates,
     shim_xmodule_js,
     XModuleMixin,
@@ -47,12 +45,13 @@ _ = lambda text: text
 @XBlock.needs("user")
 class HtmlBlockMixin(  # lint-amnesty, pylint: disable=abstract-method
     XmlMixin, EditingMixin,
-    XModuleToXBlockMixin, HTMLSnippet, ResourceTemplates, XModuleMixin,
+    XModuleToXBlockMixin, ResourceTemplates, XModuleMixin,
 ):
     """
     The HTML XBlock mixin.
     This provides the base class for all Html-ish blocks (including the HTML XBlock).
     """
+
     display_name = String(
         display_name=_("Display Name"),
         help=_("The display name for this component."),
@@ -93,7 +92,8 @@ class HtmlBlockMixin(  # lint-amnesty, pylint: disable=abstract-method
         Return a fragment that contains the html for the student view
         """
         fragment = Fragment(self.get_html())
-        add_webpack_to_fragment(fragment, 'HtmlBlockPreview')
+        add_css_to_fragment(fragment, 'HtmlBlockDisplay.css')
+        add_webpack_js_to_fragment(fragment, 'HtmlBlockDisplay')
         shim_xmodule_js(fragment, 'HTMLModule')
         return fragment
 
@@ -136,23 +136,12 @@ class HtmlBlockMixin(  # lint-amnesty, pylint: disable=abstract-method
         Return the studio view.
         """
         fragment = Fragment(
-            self.runtime.service(self, 'mako').render_template(self.mako_template, self.get_context())
+            self.runtime.service(self, 'mako').render_cms_template(self.mako_template, self.get_context())
         )
-        add_webpack_to_fragment(fragment, 'HtmlBlockStudio')
+        add_css_to_fragment(fragment, 'HtmlBlockEditor.css')
+        add_webpack_js_to_fragment(fragment, 'HtmlBlockEditor')
         shim_xmodule_js(fragment, 'HTMLEditingDescriptor')
         return fragment
-
-    preview_view_js = {
-        'js': [
-            resource_filename(__name__, 'js/src/html/display.js'),
-            resource_filename(__name__, 'js/src/javascript_loader.js'),
-            resource_filename(__name__, 'js/src/collapsible.js'),
-            resource_filename(__name__, 'js/src/html/imageModal.js'),
-            resource_filename(__name__, 'js/common_static/js/vendor/draggabilly.js'),
-        ],
-        'xmodule_js': resource_filename(__name__, 'js/src/xmodule.js'),
-    }
-    preview_view_css = {'scss': [resource_filename(__name__, 'css/html/display.scss')]}
 
     uses_xmodule_styles_setup = True
 
@@ -161,19 +150,6 @@ class HtmlBlockMixin(  # lint-amnesty, pylint: disable=abstract-method
     filename_extension = "xml"
     template_dir_name = "html"
     show_in_read_only_mode = True
-
-    studio_view_js = {
-        'js': [
-            resource_filename(__name__, 'js/src/html/edit.js')
-        ],
-        'xmodule_js': resource_filename(__name__, 'js/src/xmodule.js'),
-    }
-    studio_view_css = {
-        'scss': [
-            resource_filename(__name__, 'css/editor/edit.scss'),
-            resource_filename(__name__, 'css/html/edit.scss')
-        ]
-    }
 
     # VS[compat] TODO (cpennington): Delete this method once all fall 2012 course
     # are being edited in the cms
@@ -305,7 +281,7 @@ class HtmlBlockMixin(  # lint-amnesty, pylint: disable=abstract-method
     @classmethod
     def parse_xml_new_runtime(cls, node, runtime, keys):
         """
-        Parse XML in the new blockstore-based runtime. Since it doesn't yet
+        Parse XML in the new learning-core-based runtime. Since it doesn't yet
         support loading separate .html files, the HTML data is assumed to be in
         a CDATA child or otherwise just inline in the OLX.
         """
@@ -379,11 +355,12 @@ class HtmlBlockMixin(  # lint-amnesty, pylint: disable=abstract-method
 
 
 @edxnotes
-class HtmlBlock(HtmlBlockMixin):  # lint-amnesty, pylint: disable=abstract-method
+class _BuiltInHtmlBlock(HtmlBlockMixin):  # lint-amnesty, pylint: disable=abstract-method
     """
     This is the actual HTML XBlock.
     Nothing extra is required; this is just a wrapper to include edxnotes support.
     """
+    is_extracted = False
 
 
 class AboutFields:  # lint-amnesty, pylint: disable=missing-class-docstring
@@ -489,7 +466,7 @@ class CourseInfoBlock(CourseInfoFields, HtmlBlockMixin):  # lint-amnesty, pylint
                 'visible_updates': course_updates[:3],
                 'hidden_updates': course_updates[3:],
             }
-            return self.runtime.service(self, 'mako').render_template(
+            return self.runtime.service(self, 'mako').render_lms_template(
                 f"{self.TEMPLATE_DIR}/course_updates.html",
                 context,
             )
@@ -515,3 +492,10 @@ class CourseInfoBlock(CourseInfoFields, HtmlBlockMixin):  # lint-amnesty, pylint
             return datetime.strptime(date, '%B %d, %Y')
         except ValueError:  # occurs for ill-formatted date values
             return datetime.today()
+
+
+HtmlBlock = (
+    _ExtractedHtmlBlock if settings.USE_EXTRACTED_HTML_BLOCK
+    else _BuiltInHtmlBlock
+)
+HtmlBlock.__name__ = "HtmlBlock"

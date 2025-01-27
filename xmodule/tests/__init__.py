@@ -1,10 +1,5 @@
 """
 unittests for xmodule
-
-Run like this:
-
-    paver test_lib -l ./xmodule
-
 """
 
 
@@ -161,14 +156,6 @@ def get_test_system(
     services = {
         'user': user_service,
         'mako': mako_service,
-        'xqueue': XQueueService(
-            url='http://xqueue.url',
-            django_auth={},
-            basic_auth=[],
-            default_queuename='testqueue',
-            waittime=10,
-            construct_callback=Mock(name='get_test_system.xqueue.construct_callback', side_effect="/"),
-        ),
         'replace_urls': replace_url_service,
         'cache': CacheService(DoNothingCache()),
         'field-data': DictFieldData({}),
@@ -224,14 +211,6 @@ def prepare_block_runtime(
     services = {
         'user': user_service,
         'mako': mako_service,
-        'xqueue': XQueueService(
-            url='http://xqueue.url',
-            django_auth={},
-            basic_auth=[],
-            default_queuename='testqueue',
-            waittime=10,
-            construct_callback=Mock(name='get_test_system.xqueue.construct_callback', side_effect="/"),
-        ),
         'replace_urls': replace_url_service,
         'cache': CacheService(DoNothingCache()),
         'field-data': DictFieldData({}),

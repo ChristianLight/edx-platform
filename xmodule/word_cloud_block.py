@@ -6,26 +6,27 @@ If student does not yet answered - `num_inputs` numbers of text inputs.
 If student have answered - words he entered and cloud.
 """
 
+from xblocks_contrib.word_cloud import WordCloudBlock as _ExtractedWordCloudBlock
 
 import json
 import logging
 
-from pkg_resources import resource_filename
-
+from django.conf import settings
 from web_fragments.fragment import Fragment
 from xblock.core import XBlock
 from xblock.fields import Boolean, Dict, Integer, List, Scope, String
+
 from xmodule.editing_block import EditingMixin
 from xmodule.raw_block import EmptyDataRawMixin
-from xmodule.util.xmodule_django import add_webpack_to_fragment
-from xmodule.xml_block import XmlMixin
+from xmodule.util.builtin_assets import add_webpack_js_to_fragment, add_css_to_fragment
 from xmodule.x_module import (
-    HTMLSnippet,
     ResourceTemplates,
     shim_xmodule_js,
     XModuleMixin,
     XModuleToXBlockMixin,
 )
+from xmodule.xml_block import XmlMixin
+
 log = logging.getLogger(__name__)
 
 # Make '_' a no-op so we can scrape strings. Using lambda instead of
@@ -44,18 +45,19 @@ def pretty_bool(value):
 
 
 @XBlock.needs('mako')
-class WordCloudBlock(  # pylint: disable=abstract-method
+class _BuiltInWordCloudBlock(  # pylint: disable=abstract-method
     EmptyDataRawMixin,
     XmlMixin,
     EditingMixin,
     XModuleToXBlockMixin,
-    HTMLSnippet,
     ResourceTemplates,
     XModuleMixin,
 ):
     """
     Word Cloud XBlock.
     """
+
+    is_extracted = False
 
     display_name = String(
         display_name=_("Display Name"),
@@ -112,27 +114,6 @@ class WordCloudBlock(  # pylint: disable=abstract-method
     resources_dir = 'assets/word_cloud'
     template_dir_name = 'word_cloud'
 
-    preview_view_js = {
-        'js': [
-            resource_filename(__name__, 'assets/word_cloud/src/js/word_cloud.js'),
-        ],
-        'xmodule_js': resource_filename(__name__, 'js/src/xmodule.js'),
-    }
-    preview_view_css = {
-        'scss': [
-            resource_filename(__name__, 'css/word_cloud/display.scss'),
-        ],
-    }
-
-    studio_view_js = {
-        'js': [
-            resource_filename(__name__, 'js/src/raw/edit/metadata-only.js'),
-        ],
-        'xmodule_js': resource_filename(__name__, 'js/src/xmodule.js'),
-    }
-    studio_view_css = {
-        'scss': [],
-    }
     studio_js_module_name = "MetadataOnlyEditingDescriptor"
     mako_template = "widgets/metadata-only-edit.html"
 
@@ -278,7 +259,7 @@ class WordCloudBlock(  # pylint: disable=abstract-method
         Renders the output that a student will see.
         """
         fragment = Fragment()
-        fragment.add_content(self.runtime.service(self, 'mako').render_template('word_cloud.html', {
+        fragment.add_content(self.runtime.service(self, 'mako').render_lms_template('word_cloud.html', {
             'ajax_url': self.ajax_url,
             'display_name': self.display_name,
             'instructions': self.instructions,
@@ -287,7 +268,8 @@ class WordCloudBlock(  # pylint: disable=abstract-method
             'num_inputs': self.num_inputs,
             'submitted': self.submitted,
         }))
-        add_webpack_to_fragment(fragment, 'WordCloudBlockPreview')
+        add_css_to_fragment(fragment, 'WordCloudBlockDisplay.css')
+        add_webpack_js_to_fragment(fragment, 'WordCloudBlockDisplay')
         shim_xmodule_js(fragment, 'WordCloud')
 
         return fragment
@@ -303,9 +285,9 @@ class WordCloudBlock(  # pylint: disable=abstract-method
         Return the studio view.
         """
         fragment = Fragment(
-            self.runtime.service(self, 'mako').render_template(self.mako_template, self.get_context())
+            self.runtime.service(self, 'mako').render_cms_template(self.mako_template, self.get_context())
         )
-        add_webpack_to_fragment(fragment, 'WordCloudBlockStudio')
+        add_webpack_js_to_fragment(fragment, 'WordCloudBlockEditor')
         shim_xmodule_js(fragment, self.studio_js_module_name)
         return fragment
 
@@ -332,3 +314,10 @@ class WordCloudBlock(  # pylint: disable=abstract-method
         xblock_body["content_type"] = "Word Cloud"
 
         return xblock_body
+
+
+WordCloudBlock = (
+    _ExtractedWordCloudBlock if settings.USE_EXTRACTED_WORD_CLOUD_BLOCK
+    else _BuiltInWordCloudBlock
+)
+WordCloudBlock.__name__ = "WordCloudBlock"

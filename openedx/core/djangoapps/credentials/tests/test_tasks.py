@@ -2,8 +2,9 @@
 Test credentials tasks
 """
 
+import logging
 from unittest import mock
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import ddt
 import pytest
@@ -13,6 +14,7 @@ from django.db import connection, reset_queries
 from django.test import TestCase, override_settings
 from freezegun import freeze_time
 from opaque_keys.edx.keys import CourseKey
+from testfixtures import LogCapture
 
 from common.djangoapps.student.tests.factories import UserFactory
 from lms.djangoapps.certificates.api import get_recently_modified_certificates
@@ -23,14 +25,16 @@ from lms.djangoapps.grades.models_api import get_recently_modified_grades
 from lms.djangoapps.grades.tests.utils import mock_passing_grade
 from lms.djangoapps.certificates.tests.factories import CertificateDateOverrideFactory, GeneratedCertificateFactory
 from openedx.core.djangoapps.catalog.tests.factories import CourseFactory, CourseRunFactory, ProgramFactory
+from openedx.core.djangoapps.content.course_overviews.tests.factories import CourseOverviewFactory
 from openedx.core.djangoapps.credentials.helpers import is_learner_records_enabled
+from openedx.core.djangoapps.credentials.tasks.v1 import tasks
 from openedx.core.djangoapps.site_configuration.tests.factories import SiteConfigurationFactory, SiteFactory
 from openedx.core.djangolib.testing.utils import skip_unless_lms
-
-from openedx.core.djangoapps.credentials.tasks.v1 import tasks
+from xmodule.data import CertificatesDisplayBehaviors
 
 
 User = get_user_model()
+LOGGER_NAME = "openedx.core.djangoapps.credentials.tasks.v1.tasks"
 TASKS_MODULE = 'openedx.core.djangoapps.credentials.tasks.v1.tasks'
 
 
@@ -77,21 +81,22 @@ class TestSendGradeToCredentialTask(TestCase):
             'letter_grade': 'A',
             'percent_grade': 1.0,
             'verified': True,
-            'lms_last_updated_at': last_updated.isoformat(),
+            'lms_last_updated_at': last_updated,
         })
 
     def test_retry(self, mock_get_api_client):
         """
-        Test that we retry when an exception occurs.
+        Test that we retry the appropriate number of times when an exception occurs.
         """
         mock_get_api_client.side_effect = boom
 
         task = tasks.send_grade_to_credentials.delay('user', 'course-v1:org+course+run', True, 'A', 1.0, None)
 
         pytest.raises(Exception, task.get)
-        assert mock_get_api_client.call_count == (tasks.MAX_RETRIES + 1)
+        assert mock_get_api_client.call_count == 11
 
 
+@ddt.ddt
 @skip_unless_lms
 class TestHandleNotifyCredentialsTask(TestCase):
     """
@@ -145,6 +150,7 @@ class TestHandleNotifyCredentialsTask(TestCase):
             'verbose': False,
             'verbosity': 1,
             'skip_checks': True,
+            'revoke_program_certs': False,
         }
 
     @mock.patch(TASKS_MODULE + '.send_notifications')
@@ -261,15 +267,15 @@ class TestHandleNotifyCredentialsTask(TestCase):
 
     @mock.patch(TASKS_MODULE + '.send_notifications')
     def test_date_args(self, mock_send):
-        self.options['start_date'] = '2017-01-31T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 31, 0, 0, tzinfo=timezone.utc)
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_send.called
         self.assertListEqual(list(mock_send.call_args[0][0]), [self.cert2, self.cert4, self.cert3])
         self.assertListEqual(list(mock_send.call_args[0][1]), [self.grade2, self.grade4, self.grade3])
         mock_send.reset_mock()
 
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
-        self.options['end_date'] = '2017-02-02T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
+        self.options['end_date'] = datetime(2017, 2, 2, 0, 0, tzinfo=timezone.utc)
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_send.called
         self.assertListEqual(list(mock_send.call_args[0][0]), [self.cert2, self.cert4])
@@ -277,15 +283,15 @@ class TestHandleNotifyCredentialsTask(TestCase):
         mock_send.reset_mock()
 
         self.options['start_date'] = None
-        self.options['end_date'] = '2017-02-02T00:00:00Z'
+        self.options['end_date'] = datetime(2017, 2, 2, 0, 0, tzinfo=timezone.utc)
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_send.called
         self.assertListEqual(list(mock_send.call_args[0][0]), [self.cert1, self.cert2, self.cert4])
         self.assertListEqual(list(mock_send.call_args[0][1]), [self.grade1, self.grade2, self.grade4])
         mock_send.reset_mock()
 
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
-        self.options['end_date'] = '2017-02-01T04:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
+        self.options['end_date'] = datetime(2017, 2, 1, 4, 0, tzinfo=timezone.utc)
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_send.called
         self.assertListEqual(list(mock_send.call_args[0][0]), [self.cert2])
@@ -293,8 +299,8 @@ class TestHandleNotifyCredentialsTask(TestCase):
 
     @mock.patch(TASKS_MODULE + '.send_notifications')
     def test_username_arg(self, mock_send):
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
-        self.options['end_date'] = '2017-02-02T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
+        self.options['end_date'] = datetime(2017, 2, 2, 0, 0, tzinfo=timezone.utc)
         self.options['user_ids'] = [str(self.user2.id)]
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_send.called
@@ -311,8 +317,8 @@ class TestHandleNotifyCredentialsTask(TestCase):
         self.assertListEqual(list(mock_send.call_args[0][1]), [self.grade4])
         mock_send.reset_mock()
 
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
-        self.options['end_date'] = '2017-02-02T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
+        self.options['end_date'] = datetime(2017, 2, 2, 0, 0, tzinfo=timezone.utc)
         self.options['user_ids'] = [str(self.user.id)]
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_send.called
@@ -340,7 +346,7 @@ class TestHandleNotifyCredentialsTask(TestCase):
 
     @mock.patch(TASKS_MODULE + '.send_notifications')
     def test_dry_run(self, mock_send):
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
         self.options['dry_run'] = True
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert not mock_send.called
@@ -349,7 +355,7 @@ class TestHandleNotifyCredentialsTask(TestCase):
     @mock.patch(TASKS_MODULE + '.send_grade_if_interesting')
     @mock.patch(TASKS_MODULE + '.handle_course_cert_changed')
     def test_hand_off(self, mock_grade_interesting, mock_program_changed, mock_program_awarded):
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_grade_interesting.call_count == 3
         assert mock_program_changed.call_count == 3
@@ -358,7 +364,7 @@ class TestHandleNotifyCredentialsTask(TestCase):
         mock_program_changed.reset_mock()
         mock_program_awarded.reset_mock()
 
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
         self.options['notify_programs'] = True
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_grade_interesting.call_count == 3
@@ -367,13 +373,13 @@ class TestHandleNotifyCredentialsTask(TestCase):
 
     @mock.patch(TASKS_MODULE + '.time')
     def test_delay(self, mock_time):
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
         self.options['page_size'] = 2
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_time.sleep.call_count == 0
         mock_time.sleep.reset_mock()
 
-        self.options['start_date'] = '2017-02-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 2, 1, 0, 0, tzinfo=timezone.utc)
         self.options['page_size'] = 2
         self.options['delay'] = 0.2
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
@@ -383,19 +389,19 @@ class TestHandleNotifyCredentialsTask(TestCase):
 
     @override_settings(DEBUG=True)
     def test_page_size(self):
-        self.options['start_date'] = '2017-01-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 1, 0, 0, tzinfo=timezone.utc)
         reset_queries()
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         baseline = len(connection.queries)
 
-        self.options['start_date'] = '2017-01-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 1, 0, 0, tzinfo=timezone.utc)
         self.options['page_size'] = 1
         reset_queries()
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert len(connection.queries) == (baseline + 6)
         # two extra page queries each for certs & grades
 
-        self.options['start_date'] = '2017-01-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 1, 0, 0, tzinfo=timezone.utc)
         self.options['page_size'] = 2
         reset_queries()
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
@@ -408,24 +414,37 @@ class TestHandleNotifyCredentialsTask(TestCase):
             site_values={'course_org_filter': ['testX']}
         )
 
-        self.options['start_date'] = '2017-01-01T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 1, 0, 0, tzinfo=timezone.utc)
         self.options['site'] = site_config.site.domain
         tasks.handle_notify_credentials(options=self.options, course_keys=[])
         assert mock_grade_interesting.call_count == 1
 
     @mock.patch(TASKS_MODULE + '.send_notifications')
     def test_send_notifications_failure(self, mock_send):
-        self.options['start_date'] = '2017-01-31T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 31, 0, 0, tzinfo=timezone.utc)
         mock_send.side_effect = boom
         with pytest.raises(Exception):
             tasks.handle_notify_credentials(options=self.options, course_keys=[])
 
     @mock.patch(TASKS_MODULE + '.send_grade_if_interesting')
     def test_send_grade_failure(self, mock_send_grade):
-        self.options['start_date'] = '2017-01-31T00:00:00Z'
+        self.options['start_date'] = datetime(2017, 1, 31, 0, 0, tzinfo=timezone.utc)
         mock_send_grade.side_effect = boom
         with pytest.raises(Exception):
             tasks.handle_notify_credentials(options=self.options, course_keys=[])
+
+    @ddt.data([True], [False])
+    @ddt.unpack
+    @mock.patch(TASKS_MODULE + '.send_notifications')
+    def test_revoke_program_certs(self, revoke_program_certs, mock_send_notifications):
+        """
+        This test verifies that the `revoke_program_certs` option is forwarded as expected when included in the options.
+        """
+        self.options['revoke_program_certs'] = revoke_program_certs
+        tasks.handle_notify_credentials(options=self.options, course_keys=[])
+        assert mock_send_notifications.called
+        mock_call_args = mock_send_notifications.call_args_list[0]
+        assert mock_call_args.kwargs['revoke_program_certs'] == revoke_program_certs
 
 
 @ddt.ddt
@@ -742,3 +761,94 @@ class TestSendNotifications(TestCase):
         else:
             mock_revoked.assert_not_called()
             mock_awarded.assert_called_once_with(**expected_signal_args)
+
+
+@skip_unless_lms
+class TestBackfillDateForAllCourseRuns(TestCase):
+    """
+    Unit Tests for the `backfill_date_for_all_course_runs` Celery task.
+    """
+    def setUp(self):
+        super().setUp()
+        self.co_instructor_paced_cdb_early_no_info_key = "course-v1:OpenEdX+InstructorPacedEarly+Run1"
+        self.co_instructor_paced_cbd_end_key = "course-v1:OpenEdX+InstructorPacedEnd+Run1"
+        self.co_instructor_paced_cdb_end_with_date_key = "course-v1:OpenEdX+InstructorPacedCAD+Run1"
+        self.co_self_paced_key = "course-v1:OpenEdX+SelfPaced+Run1"
+        self.course_run_keys = [
+            self.co_instructor_paced_cdb_early_no_info_key,
+            self.co_instructor_paced_cbd_end_key,
+            self.co_instructor_paced_cdb_end_with_date_key,
+            self.co_self_paced_key,
+        ]
+        self.co_instructor_paced_cdb_early_no_info = CourseOverviewFactory(
+            certificate_available_date=None,
+            certificates_display_behavior=CertificatesDisplayBehaviors.EARLY_NO_INFO,
+            id=CourseKey.from_string(self.co_instructor_paced_cdb_early_no_info_key),
+            self_paced=False,
+        )
+        self.co_instructor_paced_cbd_end = CourseOverviewFactory(
+            certificate_available_date=None,
+            certificates_display_behavior=CertificatesDisplayBehaviors.END,
+            id=CourseKey.from_string(self.co_instructor_paced_cbd_end_key),
+            self_paced=False,
+        )
+        self.co_instructor_paced_cdb_end_with_date = CourseOverviewFactory(
+            certificate_available_date=(datetime.now(timezone.utc) + timedelta(days=30)),
+            certificates_display_behavior=CertificatesDisplayBehaviors.END_WITH_DATE,
+            id=CourseKey.from_string(self.co_instructor_paced_cdb_end_with_date_key),
+            self_paced=False,
+        )
+        self.co_self_paced = CourseOverviewFactory(
+            id=CourseKey.from_string(self.co_self_paced_key),
+            self_paced=True,
+        )
+
+    @mock.patch(
+        'openedx.core.djangoapps.credentials.tasks.v1.tasks.update_certificate_available_date_on_course_update.delay'
+    )
+    def test_backfill_dates(self, mock_update):
+        """
+        Tests that the `backfill_date_for_all_course_runs` task enqueues the expected number of
+        `update_certificate_available_date_on_course_update` subtasks. We also capture and verify the contents of the
+        logs to ensure debugging capabilities by humans.
+        """
+        expected_messages = [
+            # instructor-paced, cdb=early_no_info msg
+            "Enqueueing an `update_certificate_available_date_on_course_update` task for course run "
+            f"`{self.co_instructor_paced_cdb_early_no_info.id}`, "
+            f"self_paced={self.co_instructor_paced_cdb_early_no_info.self_paced}, "
+            f"end={self.co_instructor_paced_cdb_early_no_info.end}, "
+            f"available_date={self.co_instructor_paced_cdb_early_no_info.certificate_available_date}, and "
+            f"display_behavior={self.co_instructor_paced_cdb_early_no_info.certificates_display_behavior.value}",
+            # instructor-paced, cdb=end msg
+            "Enqueueing an `update_certificate_available_date_on_course_update` task for course run "
+            f"`{self.co_instructor_paced_cbd_end.id}`, "
+            f"self_paced={self.co_instructor_paced_cbd_end.self_paced}, "
+            f"end={self.co_instructor_paced_cbd_end.end}, "
+            f"available_date={self.co_instructor_paced_cbd_end.certificate_available_date}, and "
+            f"display_behavior={self.co_instructor_paced_cbd_end.certificates_display_behavior.value}",
+            # instructor-paced, cdb=end_with_date msg
+            "Enqueueing an `update_certificate_available_date_on_course_update` task for course run "
+            f"`{self.co_instructor_paced_cdb_end_with_date.id}`, "
+            f"self_paced={self.co_instructor_paced_cdb_end_with_date.self_paced}, "
+            f"end={self.co_instructor_paced_cdb_end_with_date.end}, "
+            f"available_date={self.co_instructor_paced_cdb_end_with_date.certificate_available_date}, and "
+            f"display_behavior={self.co_instructor_paced_cdb_end_with_date.certificates_display_behavior.value}",
+            # self-paced course run msg
+            "Enqueueing an `update_certificate_available_date_on_course_update` task for course run "
+            f"`{self.co_self_paced.id}`, self_paced={self.co_self_paced.self_paced}, end={self.co_self_paced.end}, "
+            f"available_date={self.co_self_paced.certificate_available_date}, and "
+            f"display_behavior={self.co_self_paced.certificates_display_behavior}",
+        ]
+
+        with LogCapture(LOGGER_NAME, level=logging.INFO) as log:
+            tasks.backfill_date_for_all_course_runs.delay()
+
+        # verify the content of captured log messages
+        for message in expected_messages:
+            log.check_present((LOGGER_NAME, 'INFO', message))
+
+        # verify that our mocked function has the expected calls
+        assert mock_update.call_count == len(expected_messages)
+        for mock_call in mock_update.call_args_list:
+            assert mock_call.args[0] in self.course_run_keys
