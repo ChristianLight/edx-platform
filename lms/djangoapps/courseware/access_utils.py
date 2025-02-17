@@ -3,7 +3,6 @@ Simple utility functions for computing access.
 It allows us to share code between access.py and block transformers.
 """
 
-
 from datetime import datetime, timedelta
 from logging import getLogger
 
@@ -20,7 +19,8 @@ from lms.djangoapps.courseware.access_response import (
     DataSharingConsentRequiredAccessError,
     EnrollmentRequiredAccessError,
     IncorrectActiveEnterpriseAccessError,
-    StartDateError
+    StartDateEnterpriseLearnerError,
+    StartDateError,
 )
 from lms.djangoapps.courseware.masquerade import get_course_masquerade, is_masquerading_as_student
 from openedx.features.course_experience import COURSE_ENABLE_UNENROLLED_ACCESS_FLAG, COURSE_PRE_START_ACCESS_FLAG
@@ -57,11 +57,68 @@ def adjust_start_date(user, days_early_for_beta, start, course_key):
 
     if CourseBetaTesterRole(course_key).has_user(user):
         debug("Adjust start time: user in beta role for %s", course_key)
-        delta = timedelta(days_early_for_beta)
-        effective = start - delta
-        return effective
+        # timedelta.max days from now is in the year 2739931, so that's probably pretty safe
+        delta = timedelta(min(days_early_for_beta, timedelta.max.days))
+        try:
+            return start - delta
+        except OverflowError:
+            return start
 
     return start
+
+
+def enterprise_learner_enrolled(request, user, course_key):
+    """
+    Determine if the learner should be redirected to the enterprise learner portal by checking their enterprise
+    memberships/enrollments.  If all of the following are true, then we are safe to redirect the learner:
+
+    * The learner is linked to an enterprise customer,
+    * The enterprise customer has subsidized the learner's enrollment in the requested course,
+    * The enterprise customer has the learner portal enabled.
+
+    NOTE: This function MUST be called from a view, or it will throw an exception.
+
+    Args:
+        request (django.http.HttpRequest): The current request being handled.  Must not be None.
+        user (User): The requesting enter, potentially an enterprise learner.
+        course_key (str): The requested course to check for enrollment.
+
+    Returns:
+        bool: True if the learner is enrolled via a linked enterprise customer and can safely be redirected to the
+        enterprise learner dashboard.
+    """
+    from openedx.features.enterprise_support.api import enterprise_customer_from_session_or_learner_data
+
+    if not user.is_authenticated:
+        return False
+
+    # enterprise_customer_data is either None (if learner is not linked to any customer) or a serialized
+    # EnterpriseCustomer representing the learner's active linked customer.
+    enterprise_customer_data = enterprise_customer_from_session_or_learner_data(request)
+    learner_portal_enabled = enterprise_customer_data and enterprise_customer_data["enable_learner_portal"]
+    if not learner_portal_enabled:
+        return False
+
+    # Additionally make sure the enterprise learner is actually enrolled in the requested course, subsidized
+    # via the discovered customer.
+    enterprise_enrollments = EnterpriseCourseEnrollment.objects.filter(
+        course_id=course_key,
+        enterprise_customer_user__user_id=user.id,
+        enterprise_customer_user__enterprise_customer__uuid=enterprise_customer_data["uuid"],
+    )
+    enterprise_enrollment_exists = enterprise_enrollments.exists()
+    log.info(
+        (
+            "[enterprise_learner_enrolled] Checking for an enterprise enrollment for "
+            "lms_user_id=%s in course_key=%s via enterprise_customer_uuid=%s. "
+            "Exists: %s"
+        ),
+        user.id,
+        course_key,
+        enterprise_customer_data["uuid"],
+        enterprise_enrollment_exists,
+    )
+    return enterprise_enrollment_exists
 
 
 def check_start_date(user, days_early_for_beta, start, course_key, display_error_to_user=True, now=None):
@@ -75,7 +132,7 @@ def check_start_date(user, days_early_for_beta, start, course_key, display_error
     Returns:
         AccessResponse: Either ACCESS_GRANTED or StartDateError.
     """
-    start_dates_disabled = settings.FEATURES['DISABLE_START_DATES']
+    start_dates_disabled = settings.FEATURES["DISABLE_START_DATES"]
     masquerading_as_student = is_masquerading_as_student(user, course_key)
 
     if start_dates_disabled and not masquerading_as_student:
@@ -92,6 +149,12 @@ def check_start_date(user, days_early_for_beta, start, course_key, display_error
         if should_grant_access:
             return ACCESS_GRANTED
 
+        # Before returning a StartDateError, determine if the learner should be redirected to the enterprise learner
+        # portal by returning StartDateEnterpriseLearnerError instead.
+        request = get_current_request()
+        if request and enterprise_learner_enrolled(request, user, course_key):
+            return StartDateEnterpriseLearnerError(start, display_error_to_user=display_error_to_user)
+
         return StartDateError(start, display_error_to_user=display_error_to_user)
 
 
@@ -100,8 +163,8 @@ def in_preview_mode():
     Returns whether the user is in preview mode or not.
     """
     hostname = get_current_request_hostname()
-    preview_lms_base = settings.FEATURES.get('PREVIEW_LMS_BASE', None)
-    return bool(preview_lms_base and hostname and hostname.split(':')[0] == preview_lms_base.split(':')[0])
+    preview_lms_base = settings.FEATURES.get("PREVIEW_LMS_BASE", None)
+    return bool(preview_lms_base and hostname and hostname.split(":")[0] == preview_lms_base.split(":")[0])
 
 
 def check_course_open_for_learner(user, course):
@@ -172,18 +235,19 @@ def check_public_access(course, visibilities):
 
 def check_data_sharing_consent(course_id):
     """
-        Grants access if the user is do not need DataSharing consent, otherwise returns data sharing link.
+    Grants access if the user is do not need DataSharing consent, otherwise returns data sharing link.
 
-        Returns:
-            AccessResponse: Either ACCESS_GRANTED or DataSharingConsentRequiredAccessError
-        """
+    Returns:
+        AccessResponse: Either ACCESS_GRANTED or DataSharingConsentRequiredAccessError
+    """
     from openedx.features.enterprise_support.api import get_enterprise_consent_url
+
     consent_url = get_enterprise_consent_url(
         request=get_current_request(),
         course_id=str(course_id),
-        return_to='courseware',
+        return_to="courseware",
         enrollment_exists=True,
-        source='CoursewareAccess'
+        source="CoursewareAccess",
     )
     if consent_url:
         return DataSharingConsentRequiredAccessError(consent_url=consent_url)
@@ -213,7 +277,7 @@ def check_correct_active_enterprise_customer(user, course_id):
     except (EnterpriseCustomerUser.DoesNotExist, EnterpriseCustomerUser.MultipleObjectsReturned):
         # Ideally this should not happen. As there should be only 1 active enterprise customer in our system
         log.error("Multiple or No Active Enterprise found for the user %s.", user.id)
-        active_enterprise_name = 'Incorrect'
+        active_enterprise_name = "Incorrect"
 
     enrollment_enterprise_name = enterprise_enrollments.first().enterprise_customer_user.enterprise_customer.name
     return IncorrectActiveEnterpriseAccessError(enrollment_enterprise_name, active_enterprise_name)

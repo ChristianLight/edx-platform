@@ -41,8 +41,7 @@ def _directory_name(data_usage_key):
     # .. setting_description: Specifies the path in storage where block structures would be saved,
     #   for storage-backed block structure cache.
     #   For more information, check https://github.com/openedx/edx-platform/pull/14571.
-    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']` and on
-    #   `block_structure.storage_backing_for_cache`.
+    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']`
     directory_prefix = settings.BLOCK_STRUCTURES_SETTINGS.get('DIRECTORY_PREFIX', '')
 
     # replace any '/' in the usage key so they aren't interpreted
@@ -74,7 +73,6 @@ def _bs_model_storage():
     # .. setting_default: None
     # .. setting_description: Specifies the storage used for storage-backed block structure cache.
     #   For more information, check https://github.com/openedx/edx-platform/pull/14571.
-    # .. setting_warnings: Depends on `block_structure.storage_backing_for_cache`.
     storage_class = settings.BLOCK_STRUCTURES_SETTINGS.get('STORAGE_CLASS')
 
     # .. setting_name: BLOCK_STRUCTURES_SETTINGS['STORAGE_KWARGS']
@@ -82,8 +80,7 @@ def _bs_model_storage():
     # .. setting_description: Specifies the keyword arguments needed to setup the storage, which
     #   would be used for storage-backed block structure cache.
     #   For more information, check https://github.com/openedx/edx-platform/pull/14571.
-    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']` and on
-    #   `block_structure.storage_backing_for_cache`.
+    # .. setting_warnings: Depends on `BLOCK_STRUCTURES_SETTINGS['STORAGE_CLASS']`
     storage_kwargs = settings.BLOCK_STRUCTURES_SETTINGS.get('STORAGE_KWARGS', {})
 
     return get_storage(storage_class, **storage_kwargs)
@@ -234,11 +231,9 @@ class BlockStructureModel(TimeStampedModel):
             with _storage_error_handling(bs_model, operation):
                 bs_model.data.save('', ContentFile(serialized_data))
 
-        cls._log(bs_model, operation, serialized_data)
-
         if not created:
             cls._prune_files(data_usage_key)
-
+        cls._log(bs_model, operation, serialized_data)
         return bs_model, created
 
     def __str__(self):
@@ -255,9 +250,6 @@ class BlockStructureModel(TimeStampedModel):
         """
         Deletes previous file versions for data_usage_key.
         """
-        if not settings.BLOCK_STRUCTURES_SETTINGS.get('PRUNING_ACTIVE', False):
-            return
-
         if num_to_keep is None:
             num_to_keep = config.num_versions_to_keep()
 
@@ -272,7 +264,6 @@ class BlockStructureModel(TimeStampedModel):
                 data_usage_key,
                 num_to_keep,
             )
-
         except Exception:  # pylint: disable=broad-except
             log.exception('BlockStructure: Exception when deleting old files; data_usage_key: %s.', data_usage_key)
 

@@ -3,24 +3,24 @@
 import logging
 import textwrap
 
+from django.conf import settings
 from lxml import etree
-from pkg_resources import resource_filename
 from web_fragments.fragment import Fragment
 from xblock.core import XBlock
 from xblock.fields import Scope, String
+from xblocks_contrib.annotatable import AnnotatableBlock as _ExtractedAnnotatableBlock
 
 from openedx.core.djangolib.markup import HTML, Text
 from xmodule.editing_block import EditingMixin
 from xmodule.raw_block import RawMixin
-from xmodule.util.xmodule_django import add_webpack_to_fragment
-from xmodule.xml_block import XmlMixin
+from xmodule.util.builtin_assets import add_webpack_js_to_fragment, add_css_to_fragment
 from xmodule.x_module import (
-    HTMLSnippet,
     ResourceTemplates,
     shim_xmodule_js,
     XModuleMixin,
     XModuleToXBlockMixin,
 )
+from xmodule.xml_block import XmlMixin
 
 log = logging.getLogger(__name__)
 
@@ -30,18 +30,19 @@ _ = lambda text: text
 
 
 @XBlock.needs('mako')
-class AnnotatableBlock(
+class _BuiltInAnnotatableBlock(
     RawMixin,
     XmlMixin,
     EditingMixin,
     XModuleToXBlockMixin,
-    HTMLSnippet,
     ResourceTemplates,
     XModuleMixin,
 ):
     """
     Annotatable XBlock.
     """
+
+    is_extracted = False
 
     data = String(
         help=_("XML data for the annotation"),
@@ -73,32 +74,6 @@ class AnnotatableBlock(
 
     uses_xmodule_styles_setup = True
 
-    preview_view_js = {
-        'js': [
-            resource_filename(__name__, 'js/src/html/display.js'),
-            resource_filename(__name__, 'js/src/annotatable/display.js'),
-            resource_filename(__name__, 'js/src/javascript_loader.js'),
-            resource_filename(__name__, 'js/src/collapsible.js'),
-        ],
-        'xmodule_js': resource_filename(__name__, 'js/src/xmodule.js'),
-    }
-    preview_view_css = {
-        'scss': [
-            resource_filename(__name__, 'css/annotatable/display.scss'),
-        ],
-    }
-
-    studio_view_js = {
-        'js': [
-            resource_filename(__name__, 'js/src/raw/edit/xml.js'),
-        ],
-        'xmodule_js': resource_filename(__name__, 'js/src/xmodule.js'),
-    }
-    studio_view_css = {
-        'scss': [
-            resource_filename(__name__, 'css/codemirror/codemirror.scss'),
-        ],
-    }
     studio_js_module_name = "XMLEditingDescriptor"
     mako_template = "widgets/raw-edit.html"
 
@@ -201,7 +176,7 @@ class AnnotatableBlock(
             'content_html': self._render_content()
         }
 
-        return self.runtime.service(self, 'mako').render_template('annotatable.html', context)
+        return self.runtime.service(self, 'mako').render_lms_template('annotatable.html', context)
 
     def student_view(self, context):  # lint-amnesty, pylint: disable=unused-argument
         """
@@ -209,7 +184,8 @@ class AnnotatableBlock(
         """
         fragment = Fragment()
         fragment.add_content(self.get_html())
-        add_webpack_to_fragment(fragment, 'AnnotatableBlockPreview')
+        add_css_to_fragment(fragment, 'AnnotatableBlockDisplay.css')
+        add_webpack_js_to_fragment(fragment, 'AnnotatableBlockDisplay')
         shim_xmodule_js(fragment, 'Annotatable')
 
         return fragment
@@ -219,8 +195,16 @@ class AnnotatableBlock(
         Return the studio view.
         """
         fragment = Fragment(
-            self.runtime.service(self, 'mako').render_template(self.mako_template, self.get_context())
+            self.runtime.service(self, 'mako').render_cms_template(self.mako_template, self.get_context())
         )
-        add_webpack_to_fragment(fragment, 'AnnotatableBlockStudio')
+        add_css_to_fragment(fragment, 'AnnotatableBlockEditor.css')
+        add_webpack_js_to_fragment(fragment, 'AnnotatableBlockEditor')
         shim_xmodule_js(fragment, self.studio_js_module_name)
         return fragment
+
+
+AnnotatableBlock = (
+    _ExtractedAnnotatableBlock if settings.USE_EXTRACTED_ANNOTATABLE_BLOCK
+    else _BuiltInAnnotatableBlock
+)
+AnnotatableBlock.__name__ = "AnnotatableBlock"

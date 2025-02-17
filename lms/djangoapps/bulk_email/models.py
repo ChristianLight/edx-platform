@@ -114,7 +114,7 @@ class Target(models.Model):
         """
         staff_qset = CourseStaffRole(course_id).users_with_role()
         instructor_qset = CourseInstructorRole(course_id).users_with_role()
-        staff_instructor_qset = (staff_qset | instructor_qset)
+        staff_instructor_qset = staff_qset | instructor_qset
         enrollment_query = models.Q(
             is_active=True,
             courseenrollment__course_id=course_id,
@@ -146,7 +146,7 @@ class Target(models.Model):
                 User.objects.filter(
                     models.Q(courseenrollment__mode=self.coursemodetarget.track.mode_slug)
                     & enrollment_query
-                )
+                ).exclude(id__in=staff_instructor_qset)
             )
         else:
             raise ValueError(f"Unrecognized target type {self.target_type}")
@@ -164,7 +164,8 @@ class CohortTarget(Target):
         app_label = "bulk_email"
 
     def __init__(self, *args, **kwargs):
-        kwargs['target_type'] = SEND_TO_COHORT
+        if not args:
+            kwargs['target_type'] = SEND_TO_COHORT
         super().__init__(*args, **kwargs)
 
     def __str__(self):
@@ -209,7 +210,8 @@ class CourseModeTarget(Target):
         app_label = "bulk_email"
 
     def __init__(self, *args, **kwargs):
-        kwargs['target_type'] = SEND_TO_TRACK
+        if not args:
+            kwargs['target_type'] = SEND_TO_TRACK
         super().__init__(*args, **kwargs)
 
     def __str__(self):
@@ -521,8 +523,7 @@ class BulkEmailFlag(ConfigurationModel):
         app_label = "bulk_email"
 
     def __str__(self):
-        current_model = BulkEmailFlag.current()
         return "BulkEmailFlag: enabled {}, require_course_email_auth: {}".format(
-            current_model.is_enabled(),
-            current_model.require_course_email_auth
+            self.enabled,
+            self.require_course_email_auth
         )

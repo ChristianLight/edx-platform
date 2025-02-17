@@ -24,14 +24,15 @@ class TestComprehensiveThemeLMS(TestCase):
         Clear static file finders cache and register cleanup methods.
         """
         super().setUp()
-        self.user = UserFactory()
+        self.TEST_PASSWORD = 'Password1234'
+        self.user = UserFactory(password=self.TEST_PASSWORD)
 
         # Clear the internal staticfiles caches, to get test isolation.
         staticfiles.finders.get_finder.cache_clear()
 
     def _login(self):
         """ Log into LMS. """
-        self.client.login(username=self.user.username, password='test')
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
 
     @with_comprehensive_theme("test-theme")
     def test_footer(self):
@@ -42,21 +43,6 @@ class TestComprehensiveThemeLMS(TestCase):
         assert resp.status_code == 200
         # This string comes from header.html of test-theme
         self.assertContains(resp, "This is a footer for test-theme.")
-
-    @with_comprehensive_theme("edx.org")
-    def test_account_settings_hide_nav(self):
-        """
-        Test that theme header doesn't show marketing site links for Account Settings page.
-        """
-        self._login()
-
-        account_settings_url = reverse('account_settings')
-        response = self.client.get(account_settings_url)
-
-        # Verify that the header navigation links are hidden for the edx.org version
-        self.assertNotContains(response, "How it Works")
-        self.assertNotContains(response, "Find courses")
-        self.assertNotContains(response, "Schools & Partners")
 
     @with_comprehensive_theme("test-theme")
     def test_logo_image(self):

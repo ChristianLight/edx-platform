@@ -12,14 +12,21 @@ from django.db import transaction
 from django.dispatch import receiver
 from edx_toggles.toggles import SettingToggle
 from opaque_keys.edx.keys import CourseKey
-from openedx_events.content_authoring.data import CourseCatalogData, CourseScheduleData
+from openedx_events.content_authoring.data import (
+    CourseCatalogData,
+    CourseData,
+    CourseScheduleData,
+    LibraryBlockData,
+    XBlockData,
+)
 from openedx_events.content_authoring.signals import (
     COURSE_CATALOG_INFO_CHANGED,
+    COURSE_IMPORT_COMPLETED,
+    LIBRARY_BLOCK_DELETED,
+    XBLOCK_CREATED,
     XBLOCK_DELETED,
-    XBLOCK_DUPLICATED,
-    XBLOCK_PUBLISHED,
+    XBLOCK_UPDATED,
 )
-from openedx_events.event_bus import get_producer
 from pytz import UTC
 
 from cms.djangoapps.contentstore.courseware_index import (
@@ -35,6 +42,14 @@ from openedx.core.djangoapps.discussions.tasks import update_discussions_setting
 from openedx.core.lib.gating import api as gating_api
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import SignalHandler, modulestore
+from xmodule.modulestore.exceptions import ItemNotFoundError
+
+from ..models import PublishableEntityLink
+from ..tasks import (
+    create_or_update_upstream_links,
+    handle_create_or_update_xblock_upstream_link,
+    handle_unlink_upstream_block,
+)
 from .signals import GRADING_POLICY_CHANGED
 
 log = logging.getLogger(__name__)
@@ -129,9 +144,17 @@ def listen_for_course_publish(sender, course_key, **kwargs):  # pylint: disable=
         update_search_index,
         update_special_exams_and_publish
     )
-    from cms.djangoapps.coursegraph.tasks import (
-        dump_course_to_neo4j
-    )
+
+    # DEVELOPER README: probably all tasks here should use transaction.on_commit
+    # to avoid stale data, but the tasks are owned by many teams and are often
+    # working well enough. Several instead use a waiting strategy.
+    # If you are in here trying to figure out why your task is not working correctly,
+    # consider whether it is getting stale data and if so choose to wait for the transaction
+    # like exams or put your task to sleep for a while like discussions.
+    # You will not be able to replicate these errors in an environment where celery runs
+    # in process because it will be inside the transaction. Use the settings from
+    # devstack_with_worker.py, and consider adding a time.sleep into send_bulk_published_signal
+    # if you really want to make sure that the task happens before the data is ready.
 
     # register special exams asynchronously after the data is ready
     course_key_str = str(course_key)
@@ -141,14 +164,9 @@ def listen_for_course_publish(sender, course_key, **kwargs):  # pylint: disable=
         # Push the course outline to learning_sequences asynchronously.
         update_outline_from_modulestore_task.delay(course_key_str)
 
-    if settings.COURSEGRAPH_DUMP_COURSE_ON_PUBLISH:
-        # Push the course out to CourseGraph asynchronously.
-        dump_course_to_neo4j.delay(course_key_str)
-
-    # Finally, call into the course search subsystem
-    # to kick off an indexing action
+    # Kick off a courseware indexing action after the data is ready
     if CoursewareSearchIndexer.indexing_is_enabled() and CourseAboutSearchIndexer.indexing_is_enabled():
-        update_search_index.delay(course_key_str, datetime.now(UTC).isoformat())
+        transaction.on_commit(lambda: update_search_index.delay(course_key_str, datetime.now(UTC).isoformat()))
 
     update_discussions_settings_from_course_task.apply_async(
         args=[course_key_str],
@@ -157,57 +175,6 @@ def listen_for_course_publish(sender, course_key, **kwargs):  # pylint: disable=
 
     # Send to a signal for catalog info changes as well, but only once we know the transaction is committed.
     transaction.on_commit(lambda: emit_catalog_info_changed_signal(course_key))
-
-
-@receiver(COURSE_CATALOG_INFO_CHANGED)
-def listen_for_course_catalog_info_changed(sender, signal, **kwargs):
-    """
-    Publish COURSE_CATALOG_INFO_CHANGED signals onto the event bus.
-    """
-    get_producer().send(
-        signal=COURSE_CATALOG_INFO_CHANGED, topic='course-catalog-info-changed',
-        event_key_field='catalog_info.course_key', event_data={'catalog_info': kwargs['catalog_info']},
-        event_metadata=kwargs['metadata'],
-    )
-
-
-@receiver(XBLOCK_PUBLISHED)
-def listen_for_xblock_published(sender, signal, **kwargs):
-    """
-    Publish XBLOCK_PUBLISHED signals onto the event bus.
-    """
-    if settings.FEATURES.get("ENABLE_SEND_XBLOCK_EVENTS_OVER_BUS"):
-        get_producer().send(
-            signal=XBLOCK_PUBLISHED, topic='xblock-published',
-            event_key_field='xblock_info.usage_key', event_data={'xblock_info': kwargs['xblock_info']},
-            event_metadata=kwargs['metadata'],
-        )
-
-
-@receiver(XBLOCK_DELETED)
-def listen_for_xblock_deleted(sender, signal, **kwargs):
-    """
-    Publish XBLOCK_DELETED signals onto the event bus.
-    """
-    if settings.FEATURES.get("ENABLE_SEND_XBLOCK_EVENTS_OVER_BUS"):
-        get_producer().send(
-            signal=XBLOCK_DELETED, topic='xblock-deleted',
-            event_key_field='xblock_info.usage_key', event_data={'xblock_info': kwargs['xblock_info']},
-            event_metadata=kwargs['metadata'],
-        )
-
-
-@receiver(XBLOCK_DUPLICATED)
-def listen_for_xblock_duplicated(sender, signal, **kwargs):
-    """
-    Publish XBLOCK_DUPLICATED signals onto the event bus.
-    """
-    if settings.FEATURES.get("ENABLE_SEND_XBLOCK_EVENTS_OVER_BUS"):
-        get_producer().send(
-            signal=XBLOCK_DUPLICATED, topic='xblock-duplicated',
-            event_key_field='xblock_info.usage_key', event_data={'xblock_info': kwargs['xblock_info']},
-            event_metadata=kwargs['metadata'],
-        )
 
 
 @receiver(SignalHandler.course_deleted)
@@ -251,12 +218,19 @@ def handle_item_deleted(**kwargs):
         # Strip branch info
         usage_key = usage_key.for_branch(None)
         course_key = usage_key.course_key
-        deleted_block = modulestore().get_item(usage_key)
+        try:
+            deleted_block = modulestore().get_item(usage_key)
+        except ItemNotFoundError:
+            return
+        id_list = {deleted_block.location}
         for block in yield_dynamic_block_descendants(deleted_block, kwargs.get('user_id')):
             # Remove prerequisite milestone data
             gating_api.remove_prerequisite(block.location)
             # Remove any 'requires' course content milestone relationships
             gating_api.set_required_content(course_key, block.location, None, None, None)
+            id_list.add(block.location)
+
+        PublishableEntityLink.objects.filter(downstream_usage_key__in=id_list).delete()
 
 
 @receiver(GRADING_POLICY_CHANGED)
@@ -278,3 +252,62 @@ def handle_grading_policy_changed(sender, **kwargs):
         task_id=result.task_id,
         kwargs=kwargs,
     ))
+
+
+@receiver(XBLOCK_CREATED)
+@receiver(XBLOCK_UPDATED)
+def create_or_update_upstream_downstream_link_handler(**kwargs):
+    """
+    Automatically create or update upstream->downstream link in database.
+    """
+    xblock_info = kwargs.get("xblock_info", None)
+    if not xblock_info or not isinstance(xblock_info, XBlockData):
+        log.error("Received null or incorrect data for event")
+        return
+
+    handle_create_or_update_xblock_upstream_link.delay(str(xblock_info.usage_key))
+
+
+@receiver(XBLOCK_DELETED)
+def delete_upstream_downstream_link_handler(**kwargs):
+    """
+    Delete upstream->downstream link from database on xblock delete.
+    """
+    xblock_info = kwargs.get("xblock_info", None)
+    if not xblock_info or not isinstance(xblock_info, XBlockData):
+        log.error("Received null or incorrect data for event")
+        return
+
+    PublishableEntityLink.objects.filter(
+        downstream_usage_key=xblock_info.usage_key
+    ).delete()
+
+
+@receiver(COURSE_IMPORT_COMPLETED)
+def handle_new_course_import(**kwargs):
+    """
+    Automatically create upstream->downstream links for course in database on new import.
+    """
+    course_data = kwargs.get("course", None)
+    if not course_data or not isinstance(course_data, CourseData):
+        log.error("Received null or incorrect data for event")
+        return
+
+    create_or_update_upstream_links.delay(
+        str(course_data.course_key),
+        force=True,
+        replace=True
+    )
+
+
+@receiver(LIBRARY_BLOCK_DELETED)
+def unlink_upstream_block_handler(**kwargs):
+    """
+    Handle unlinking the upstream (library) block from any downstream (course) blocks.
+    """
+    library_block = kwargs.get("library_block", None)
+    if not library_block or not isinstance(library_block, LibraryBlockData):
+        log.error("Received null or incorrect data for event")
+        return
+
+    handle_unlink_upstream_block.delay(str(library_block.usage_key))

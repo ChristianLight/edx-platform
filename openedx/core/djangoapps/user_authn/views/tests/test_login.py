@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import json
 import unicodedata
+import urllib.parse
 from unittest.mock import Mock, patch
 
 import ddt
@@ -312,6 +313,9 @@ class LoginTest(SiteMixin, CacheIsolationTestCase, OpenEdxEventsTestMixin):
             HTTP_ACCEPT='*/*',
         )
 
+        if not is_activated:
+            next_url = urllib.parse.quote(next_url)
+
         self._assert_response(response, success=True)
         self._assert_redirect_url(response, settings.LMS_ROOT_URL + expected_redirect + next_url)
 
@@ -492,7 +496,7 @@ class LoginTest(SiteMixin, CacheIsolationTestCase, OpenEdxEventsTestMixin):
 
         # Check that the URLs are absolute
         for url in user_info["header_urls"].values():
-            assert 'http://testserver/' in url
+            assert 'http://' in url
 
     def test_logout_deletes_mktg_cookies(self):
         response, _ = self._login_response(self.user_email, self.password)
@@ -1141,7 +1145,7 @@ class LoginSessionViewTest(ApiTestCase, OpenEdxEventsTestMixin):
         mock_segment.track.assert_called_once_with(
             expected_user_id,
             'edx.bi.user.account.authenticated',
-            {'category': 'conversion', 'provider': None, 'label': track_label}
+            {'category': 'conversion', 'provider': None, 'label': track_label, 'anonymous_id': ''}
         )
 
     def test_login_with_username(self):

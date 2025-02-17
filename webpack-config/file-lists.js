@@ -10,9 +10,7 @@ module.exports = {
         path.resolve(__dirname, '../common/static/common/js/components/views/paging_footer.js'),
         path.resolve(__dirname, '../cms/static/js/views/paging.js'),
         path.resolve(__dirname, '../common/static/common/js/components/utils/view_utils.js'),
-        /descriptors\/js/,
-        /modules\/js/,
-        /xmodule\/js\/src\//,
+        /xmodule\/js\/src/,
         path.resolve(__dirname, '../openedx/features/course_bookmarks/static/course_bookmarks/js/views/bookmark_button.js')
     ],
 
@@ -81,9 +79,6 @@ module.exports = {
         path.resolve(__dirname, '../lms/static/js/learner_dashboard/views/program_header_view.js'),
         path.resolve(__dirname, '../lms/static/js/learner_dashboard/views/sidebar_view.js'),
         path.resolve(__dirname, '../lms/static/js/learner_dashboard/views/upgrade_message_view.js'),
-        path.resolve(__dirname, '../lms/static/js/student_account/views/account_section_view.js'),
-        path.resolve(__dirname, '../lms/static/js/student_account/views/account_settings_fields.js'),
-        path.resolve(__dirname, '../lms/static/js/student_account/views/account_settings_view.js'),
         path.resolve(__dirname, '../lms/static/js/student_account/views/FormView.js'),
         path.resolve(__dirname, '../lms/static/js/student_account/views/LoginView.js'),
         path.resolve(__dirname, '../lms/static/js/student_account/views/RegisterView.js'),
@@ -101,9 +96,6 @@ module.exports = {
             '../openedx/features/course_search/static/course_search/js/views/dashboard_search_results_view.js'
         ),
         path.resolve(__dirname, '../openedx/features/course_search/static/course_search/js/views/search_results_view.js'),
-        path.resolve(__dirname, '../openedx/features/learner_profile/static/learner_profile/js/views/badge_list_container.js'),
-        path.resolve(__dirname, '../openedx/features/learner_profile/static/learner_profile/js/views/badge_list_view.js'),
-        path.resolve(__dirname, '../openedx/features/learner_profile/static/learner_profile/js/views/badge_view.js'),
         path.resolve(
             __dirname,
             '../openedx/features/learner_profile/static/learner_profile/js/views/learner_profile_fields.js'

@@ -318,6 +318,8 @@ def get_supported_providers() -> List[str]:
 class ProviderFilter(StackedConfigurationModel):
     """
     Associate allow/deny-lists of discussions providers with courses/orgs
+
+    .. no_pii:
     """
 
     allow = ListCharField(
@@ -406,6 +408,8 @@ T = TypeVar('T', bound='DiscussionsConfiguration')
 class DiscussionsConfiguration(TimeStampedModel):
     """
     Associates a learning context with discussion provider and configuration
+
+    .. no_pii:
     """
 
     context_key = LearningContextKeyField(
@@ -424,10 +428,10 @@ class DiscussionsConfiguration(TimeStampedModel):
     )
     posting_restrictions = models.CharField(
         max_length=15,
-        default=PostingRestriction.SCHEDULED,
+        default=PostingRestriction.DISABLED,
         choices=PostingRestriction.choices,
         help_text=_(
-            "The Posting availabilty in discussions whether it will be enabled, scheduled or indefinitely disabled."
+            "The Posting availability in discussions whether it will be enabled, scheduled or indefinitely disabled."
         )
     )
     lti_configuration = models.ForeignKey(
@@ -554,6 +558,8 @@ class DiscussionsConfiguration(TimeStampedModel):
 class DiscussionTopicLink(models.Model):
     """
     A model linking discussion topics ids to the part of a course they are linked to.
+
+    ..no_pii:
     """
     context_key = LearningContextKeyField(
         db_index=True,

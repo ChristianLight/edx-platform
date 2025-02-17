@@ -87,7 +87,7 @@ class EmailSendFromDashboardTestCase(SharedModuleStoreTestCase):
         """
         Log in self.client as user.
         """
-        self.client.login(username=user.username, password="test")
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
 
     def goto_instructor_dash_email_view(self):
         """
@@ -743,7 +743,7 @@ class TestCourseEmailContext(SharedModuleStoreTestCase):
         assert email_context['course_image_url'] == \
                f'{scheme}://edx.org/asset-v1:{course_id_fragment}+type@asset+block@images_course_image.jpg'
         assert email_context['email_settings_url'] == f'{scheme}://edx.org/dashboard'
-        assert email_context['account_settings_url'] == f'{scheme}://edx.org/account/settings'
+        assert email_context['account_settings_url'] == settings.ACCOUNT_MICROFRONTEND_URL
 
     @override_settings(LMS_ROOT_URL="http://edx.org")
     def test_insecure_email_context(self):

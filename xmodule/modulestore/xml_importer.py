@@ -27,22 +27,26 @@ import mimetypes
 import os
 import re
 from abc import abstractmethod
+from datetime import datetime, timezone
 
 import xblock
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils.translation import gettext as _
 from lxml import etree
 from opaque_keys.edx.keys import UsageKey
 from opaque_keys.edx.locator import LibraryLocator
+from openedx_events.content_authoring.data import CourseData
+from openedx_events.content_authoring.signals import COURSE_IMPORT_COMPLETED
 from path import Path as path
 from xblock.core import XBlockMixin
 from xblock.fields import Reference, ReferenceList, ReferenceValueDict, Scope
 from xblock.runtime import DictKeyValueStore, KvsFieldData
 
 from common.djangoapps.util.monitoring import monitor_import_failure
+from openedx.core.djangoapps.content_tagging.api import import_course_tags_from_csv
 from xmodule.assetstore import AssetMetadata
 from xmodule.contentstore.content import StaticContent
 from xmodule.errortracker import make_error_tracker
-from xmodule.library_tools import LibraryToolsService
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import ASSET_IGNORE_REGEX
 from xmodule.modulestore.exceptions import DuplicateCourseError
@@ -476,6 +480,13 @@ class ImportManager:
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def import_tags(self, data_path, dest_id):
+        """
+        To be overloaded with a method that adds tags to already imported blocks
+        """
+        raise NotImplementedError
+
     def recursive_build(self, source_courselike, courselike, courselike_key, dest_id):
         """
         Recursively imports all child blocks from the temporary modulestore into the
@@ -540,6 +551,11 @@ class ImportManager:
                 # pylint: disable=raise-missing-from
                 raise BlockFailedToImport(leftover.display_name, leftover.location)
 
+    def post_course_import(self, dest_id):
+        """
+        Tasks that need to triggered after a course is imported.
+        """
+
     def run_imports(self):
         """
         Iterate over the given directories and yield courses.
@@ -574,6 +590,14 @@ class ImportManager:
                 # Import all draft items into the courselike.
                 courselike = self.import_drafts(courselike, courselike_key, data_path, dest_id)
 
+            with self.store.bulk_operations(dest_id):
+                try:
+                    self.import_tags(data_path, dest_id)
+                except FileNotFoundError:
+                    logging.info(f'Course import {dest_id}: No tags.csv file present.')
+                except ValueError as e:
+                    logging.info(f'Course import {dest_id}: {str(e)}')
+            self.post_course_import(dest_id)
             yield courselike
 
 
@@ -695,6 +719,25 @@ class CourseImportManager(ImportManager):
         # Fetch the course to return the most recent course version.
         return self.store.get_course(courselike.id.replace(branch=None, version_guid=None))
 
+    def import_tags(self, data_path, dest_id):
+        """
+        Imports tags into course blocks.
+        """
+        csv_path = path(data_path) / 'tags.csv'
+        import_course_tags_from_csv(csv_path, dest_id)
+
+    def post_course_import(self, dest_id):
+        """
+        Trigger celery task to create upstream links for newly imported blocks.
+        """
+        # .. event_implemented_name: COURSE_IMPORT_COMPLETED
+        COURSE_IMPORT_COMPLETED.send_event(
+            time=datetime.now(timezone.utc),
+            course=CourseData(
+                course_key=dest_id
+            )
+        )
+
 
 class LibraryImportManager(ImportManager):
     """
@@ -766,6 +809,13 @@ class LibraryImportManager(ImportManager):
         """
         return courselike
 
+    def import_tags(self, data_path, dest_id):
+        """
+        Imports tags into library blocks
+        """
+        # We don't support tags in v1 libraries, and v2 libraries don't have
+        # an import/export format defined yet. No action needed here for now.
+
 
 def import_course_from_xml(*args, **kwargs):
     """
@@ -783,7 +833,7 @@ def import_library_from_xml(*args, **kwargs):
     return list(manager.run_imports())
 
 
-def _update_and_import_block(
+def _update_and_import_block(  # pylint: disable=too-many-statements
         block, store, user_id,
         source_course_id, dest_course_id,
         do_import_static=True, runtime=None):
@@ -880,7 +930,7 @@ def _update_and_import_block(
         # according to this existing library and library content block.
         if block.source_library_id and store.get_library(block.source_library_key):
             # If the library content block is already in the course, then don't
-            # refresh the children when we re-import it. This lets us address
+            # sync the children when we re-import it. This lets us address
             # TNL-7507 (Randomized Content Block Settings Lost in Course Import)
             # while still avoiding AA-310, where the IDs of the children for an
             # existing library_content block might be altered, losing student
@@ -900,10 +950,14 @@ def _update_and_import_block(
             try:
                 # Update library content block's children on draft branch
                 with store.branch_setting(branch_setting=ModuleStoreEnum.Branch.draft_preferred):
-                    LibraryToolsService(store, user_id).update_children(
-                        block,
-                        version=block.source_library_version,
-                    )
+                    try:
+                        block.sync_from_library()
+                    except ObjectDoesNotExist:
+                        # If the source library does not exist, that's OK, the library content will still kinda work.
+                        # Unfortunately, any setting defaults that are set in the library will be missing.
+                        # TODO save library default settings to course's OLX and then load them here if available:
+                        # https://github.com/openedx/edx-platform/issues/33742
+                        pass
             except ValueError as err:
                 # The specified library version does not exist.
                 log.error(err)

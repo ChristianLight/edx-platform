@@ -4,7 +4,7 @@ Discussion XBlock
 
 import logging
 import urllib
-
+from django.conf import settings
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.urls import reverse
 from django.utils.translation import get_language_bidi
@@ -12,9 +12,11 @@ from web_fragments.fragment import Fragment
 from xblock.completable import XBlockCompletionMode
 from xblock.core import XBlock
 from xblock.fields import UNIQUE_ID, Scope, String
-from xblockutils.resources import ResourceLoader
-from xblockutils.studio_editable import StudioEditableXBlockMixin
+from xblock.utils.resources import ResourceLoader
+from xblock.utils.studio_editable import StudioEditableXBlockMixin
+from xblocks_contrib.discussion import DiscussionXBlock as _ExtractedDiscussionXBlock
 
+from lms.djangoapps.discussion.django_comment_client.permissions import has_permission
 from openedx.core.djangoapps.discussions.models import DiscussionsConfiguration, Provider
 from openedx.core.djangolib.markup import HTML, Text
 from openedx.core.lib.xblock_utils import get_css_dependencies, get_js_dependencies
@@ -34,10 +36,12 @@ def _(text):
 @XBlock.needs('user')  # pylint: disable=abstract-method
 @XBlock.needs('i18n')
 @XBlock.needs('mako')
-class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amnesty, pylint: disable=abstract-method
+class _BuiltInDiscussionXBlock(XBlock, StudioEditableXBlockMixin,
+                               XmlMixin):  # lint-amnesty, pylint: disable=abstract-method
     """
     Provides a discussion forum that is inline with other content in the courseware.
     """
+    is_extracted = False
     completion_mode = XBlockCompletionMode.EXCLUDED
 
     discussion_id = String(scope=Scope.settings, default=UNIQUE_ID)
@@ -154,15 +158,15 @@ class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amn
         :param str permission: Permission
         :rtype: bool
         """
-        # normal import causes the xmodule_assets command to fail due to circular import - hence importing locally
-        from lms.djangoapps.discussion.django_comment_client.permissions import has_permission
-
         return has_permission(self.django_user, permission, self.course_key)
 
     def student_view(self, context=None):
         """
         Renders student view for LMS.
         """
+        # to prevent a circular import issue
+        import lms.djangoapps.discussion.django_comment_client.utils as utils
+
         fragment = Fragment()
 
         if not self.is_visible:
@@ -188,22 +192,23 @@ class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amn
                     url='{}?{}'.format(reverse('register_user'), qs),
                 ),
             )
+        if utils.is_discussion_enabled(self.course_key):
+            context = {
+                'discussion_id': self.discussion_id,
+                'display_name': self.display_name if self.display_name else _("Discussion"),
+                'user': self.django_user,
+                'course_id': self.course_key,
+                'discussion_category': self.discussion_category,
+                'discussion_target': self.discussion_target,
+                'can_create_thread': self.has_permission("create_thread"),
+                'can_create_comment': self.has_permission("create_comment"),
+                'can_create_subcomment': self.has_permission("create_sub_comment"),
+                'login_msg': login_msg,
+            }
+            fragment.add_content(
+                self.runtime.service(self, 'mako').render_lms_template('discussion/_discussion_inline.html', context)
+            )
 
-        context = {
-            'discussion_id': self.discussion_id,
-            'display_name': self.display_name if self.display_name else _("Discussion"),
-            'user': self.django_user,
-            'course_id': self.course_key,
-            'discussion_category': self.discussion_category,
-            'discussion_target': self.discussion_target,
-            'can_create_thread': self.has_permission("create_thread"),
-            'can_create_comment': self.has_permission("create_comment"),
-            'can_create_subcomment': self.has_permission("create_sub_comment"),
-            'login_msg': login_msg,
-        }
-
-        fragment.add_content(self.runtime.service(self, 'mako').render_template('discussion/_discussion_inline.html',
-                                                                                context))
         fragment.initialize_js('DiscussionInlineBlock')
 
         return fragment
@@ -213,7 +218,8 @@ class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amn
         Renders author view for Studio.
         """
         fragment = Fragment()
-        fragment.add_content(self.runtime.service(self, 'mako').render_template(
+        # For historic reasons, this template is in the LMS templates folder:
+        fragment.add_content(self.runtime.service(self, 'mako').render_lms_template(
             'discussion/_discussion_inline_studio.html',
             {
                 'discussion_id': self.discussion_id,
@@ -229,7 +235,7 @@ class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amn
         return {'topic_id': self.discussion_id}
 
     @classmethod
-    def parse_xml(cls, node, runtime, keys, id_generator):
+    def parse_xml(cls, node, runtime, keys):
         """
         Parses OLX into XBlock.
 
@@ -242,7 +248,7 @@ class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amn
         XBlock.parse_xml. Otherwise this method parses file in "discussion" folder (known as definition_xml), applies
         policy.json and updates fields accordingly.
         """
-        block = super().parse_xml(node, runtime, keys, id_generator)
+        block = super().parse_xml(node, runtime, keys)
 
         cls._apply_metadata_and_policy(block, node, runtime)
 
@@ -271,3 +277,10 @@ class DiscussionXBlock(XBlock, StudioEditableXBlockMixin, XmlMixin):  # lint-amn
         for field_name, value in metadata.items():
             if field_name in block.fields:
                 setattr(block, field_name, value)
+
+
+DiscussionXBlock = (
+    _ExtractedDiscussionXBlock if settings.USE_EXTRACTED_DISCUSSION_BLOCK
+    else _BuiltInDiscussionXBlock
+)
+DiscussionXBlock.__name__ = "DiscussionXBlock"
