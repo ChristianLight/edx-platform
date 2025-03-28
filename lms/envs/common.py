@@ -3369,6 +3369,7 @@ INSTALLED_APPS = [
     "openedx_learning.apps.authoring.components",
     "openedx_learning.apps.authoring.contents",
     "openedx_learning.apps.authoring.publishing",
+    "openedx_learning.apps.authoring.units",
 ]
 
 
@@ -4912,13 +4913,6 @@ OPTIONAL_FIELD_API_RATELIMIT = '10/h'
 ##### PASSWORD RESET RATE LIMIT SETTINGS #####
 PASSWORD_RESET_IP_RATE = '1/m'
 PASSWORD_RESET_EMAIL_RATE = '2/h'
-
-
-#### BRAZE API SETTINGS ####
-
-EDX_BRAZE_API_KEY = None
-EDX_BRAZE_API_SERVER = None
-BRAZE_COURSE_ENROLLMENT_CANVAS_ID = ''
 
 # Keeping this for back compatibility with learner dashboard api
 GENERAL_RECOMMENDATION = {}
